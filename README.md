@@ -1,4 +1,5 @@
 ![Tests](https://github.com/JexinSam/mssql_mcp_server/actions/workflows/test.yml/badge.svg)
+[![smithery badge](https://smithery.ai/badge/@JexinSam/mssql_mcp_server)](https://smithery.ai/server/@JexinSam/mssql_mcp_server)
 
 # MSSQL MCP Server
 
@@ -18,6 +19,15 @@ This ensures safer database exploration, strict permission enforcement, and logg
 
 ## Installation
 
+### Installing via Smithery
+
+To install MSSQL MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@JexinSam/mssql_mcp_server):
+
+```bash
+npx -y @smithery/cli install @JexinSam/mssql_mcp_server --client claude
+```
+
+### Manual Installation
 ```bash
 pip install mssql-mcp-server
 ```
