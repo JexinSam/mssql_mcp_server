@@ -32,6 +32,9 @@ MSSQL_HOST=localhost
 MSSQL_USER=your_username
 MSSQL_PASSWORD=your_password
 MSSQL_DATABASE=your_database
+#optional
+TrustServerCertificate=yes
+Trusted_Connection=no
 ```
 
 ## Usage

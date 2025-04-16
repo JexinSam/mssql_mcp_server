@@ -20,14 +20,16 @@ def get_db_config():
         "server": os.getenv("MSSQL_HOST", "localhost"),
         "user": os.getenv("MSSQL_USER"),
         "password": os.getenv("MSSQL_PASSWORD"),
-        "database": os.getenv("MSSQL_DATABASE")
+        "database": os.getenv("MSSQL_DATABASE"),
+        "trusted_server_certificate": os.getenv("TrustServerCertificate", "yes"),
+        "trusted_connection": os.getenv("Trusted_Connection", "no")
     }
     if not all([config["user"], config["password"], config["database"]]):
         logger.error("Missing required database configuration. Please check environment variables:")
         logger.error("MSSQL_USER, MSSQL_PASSWORD, and MSSQL_DATABASE are required")
         raise ValueError("Missing required database configuration")
     
-    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};"
+    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};TrustServerCertificate={config['trusted_server_certificate']};Trusted_Connection={config['trusted_connection']};"
 
     return config, connection_string
 
