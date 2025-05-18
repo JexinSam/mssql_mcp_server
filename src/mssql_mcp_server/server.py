@@ -79,7 +79,7 @@ async def read_resource(uri: AnyUrl) -> str:
     try:
         with connect(connection_string) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {table} LIMIT 100")
+                cursor.execute(f"SELECT TOP 100 * FROM {table}")
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
                 result = [",".join(map(str, row)) for row in rows]
