@@ -17,7 +17,7 @@ def get_db_config():
     """Get database configuration from environment variables."""
     config = {
         "driver": os.getenv("MSSQL_DRIVER", "SQL Server"),
-        "server": os.getenv("MSSQL_HOST", "localhost"),
+        "server": os.getenv("MSSQL_HOST") or os.getenv("MSSQL_SERVER") or "localhost",
         "user": os.getenv("MSSQL_USER"),
         "password": os.getenv("MSSQL_PASSWORD"),
         "database": os.getenv("MSSQL_DATABASE"),
