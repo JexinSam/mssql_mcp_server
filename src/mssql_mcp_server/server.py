@@ -24,14 +24,27 @@ def get_db_config():
         "trusted_server_certificate": os.getenv("TrustServerCertificate", "yes"),
         "trusted_connection": os.getenv("Trusted_Connection", "no")
     }
-    if not all([config["user"], config["password"], config["database"]]):
+
+    if not is_valid_config_present(config):
         logger.error("Missing required database configuration. Please check environment variables:")
-        logger.error("MSSQL_USER, MSSQL_PASSWORD, and MSSQL_DATABASE are required")
+        logger.error("MSSQL_DATABASE and either MSSQL_USER and MSSQL_PASSWORD, or Trusted_Connection=yes is required")
         raise ValueError("Missing required database configuration")
     
     connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};TrustServerCertificate={config['trusted_server_certificate']};Trusted_Connection={config['trusted_connection']};"
 
     return config, connection_string
+
+def is_valid_config_present(config):
+    if not config["database"]:
+        return False
+    
+    if config["user"] and config["password"]:
+        return True
+    
+    if config["trusted_connection"].lower() == "yes":
+        return True
+    
+    return False
 
 # Initialize server
 app = Server("mssql_mcp_server")
