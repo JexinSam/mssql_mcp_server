@@ -13,23 +13,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mssql_mcp_server")
 
+def _odbc_value(value: str) -> str:
+    """Brace-wrap ODBC values that contain reserved characters."""
+    if not value:
+        return value
+    if any(ch in value for ch in (";", "{", "}")):
+        return "{" + value.replace("}", "}}") + "}"
+    return value
+
+
 def get_db_config():
     """Get database configuration from environment variables."""
+    # Default to ODBC Driver 18; the legacy "SQL Server" driver name is rarely
+    # installed on modern macOS/Linux clients.
+    driver = os.getenv("MSSQL_DRIVER", "ODBC Driver 18 for SQL Server")
+    host = os.getenv("MSSQL_HOST") or os.getenv("MSSQL_SERVER", "localhost")
+    port = os.getenv("MSSQL_PORT")
+    if port and "," not in host:
+        host = f"{host},{port}"
+
     config = {
-        "driver": os.getenv("MSSQL_DRIVER", "SQL Server"),
-        "server": os.getenv("MSSQL_HOST", "localhost"),
+        "driver": driver,
+        "server": host,
         "user": os.getenv("MSSQL_USER"),
         "password": os.getenv("MSSQL_PASSWORD"),
         "database": os.getenv("MSSQL_DATABASE"),
         "trusted_server_certificate": os.getenv("TrustServerCertificate", "yes"),
-        "trusted_connection": os.getenv("Trusted_Connection", "no")
+        "trusted_connection": os.getenv("Trusted_Connection", "no"),
     }
     if not all([config["user"], config["password"], config["database"]]):
         logger.error("Missing required database configuration. Please check environment variables:")
         logger.error("MSSQL_USER, MSSQL_PASSWORD, and MSSQL_DATABASE are required")
         raise ValueError("Missing required database configuration")
-    
-    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};TrustServerCertificate={config['trusted_server_certificate']};Trusted_Connection={config['trusted_connection']};"
+
+    # Brace-wrap fields that may contain ';' (common in passwords). Without this,
+    # pyodbc silently truncates or mis-parses the connection string.
+    connection_string = (
+        f"Driver={_odbc_value(config['driver'])};"
+        f"Server={config['server']};"
+        f"UID={_odbc_value(config['user'])};"
+        f"PWD={_odbc_value(config['password'])};"
+        f"Database={_odbc_value(config['database'])};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate={config['trusted_server_certificate']};"
+        f"Trusted_Connection={config['trusted_connection']};"
+    )
 
     return config, connection_string
 
