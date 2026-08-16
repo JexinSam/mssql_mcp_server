@@ -92,5 +92,6 @@ jobs:
         MSSQL_PASSWORD: TestPassword123!
         MSSQL_DATABASE: master
         MSSQL_DRIVER: ODBC Driver 18 for SQL Server
+        TrustServerCertificate: "yes"
       run: |
         python -m pytest tests/ -v
