@@ -1,10 +1,9 @@
-import asyncio
 import logging
 import os
+import re
 from pyodbc import connect, Error
-from mcp.server import Server
-from mcp.types import Resource, Tool, TextContent
-from pydantic import AnyUrl
+
+from mcp.server.mcpserver import MCPServer
 
 # Configure logging
 logging.basicConfig(
@@ -12,6 +11,17 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("mssql_mcp_server")
+
+# Valid SQL identifier pattern to prevent SQL injection
+_VALID_IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_@#$]*$')
+
+
+def _validate_identifier(name: str) -> str:
+    """Validate and quote a SQL identifier to prevent injection."""
+    if not name or not _VALID_IDENTIFIER.match(name):
+        raise ValueError(f"Invalid SQL identifier: {name!r}")
+    return f"[{name}]"
+
 
 def get_db_config():
     """Get database configuration from environment variables."""
@@ -29,160 +39,229 @@ def get_db_config():
         logger.error("Missing required database configuration. Please check environment variables:")
         logger.error("MSSQL_DATABASE and either MSSQL_USER and MSSQL_PASSWORD, or Trusted_Connection=yes is required")
         raise ValueError("Missing required database configuration")
-    
-    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};TrustServerCertificate={config['trusted_server_certificate']};Trusted_Connection={config['trusted_connection']};"
+
+    # Build connection string — omit UID/PWD for Trusted Connection
+    if config["trusted_connection"].lower() == "yes":
+        connection_string = (
+            f"Driver={config['driver']};"
+            f"Server={config['server']};"
+            f"Database={config['database']};"
+            f"TrustServerCertificate={config['trusted_server_certificate']};"
+            f"Trusted_Connection=yes;"
+        )
+    else:
+        connection_string = (
+            f"Driver={config['driver']};"
+            f"Server={config['server']};"
+            f"UID={config['user']};"
+            f"PWD={config['password']};"
+            f"Database={config['database']};"
+            f"TrustServerCertificate={config['trusted_server_certificate']};"
+            f"Trusted_Connection={config['trusted_connection']};"
+        )
 
     return config, connection_string
 
+
 def is_valid_config_present(config):
+    """Check if the required database configuration is present."""
     if not config["database"]:
         return False
-    
+
     if config["user"] and config["password"]:
         return True
-    
+
     if config["trusted_connection"].lower() == "yes":
         return True
-    
+
     return False
 
-# Initialize server
-app = Server("mssql_mcp_server")
 
-@app.list_resources()
-async def list_resources() -> list[Resource]:
-    """List MSSQL tables as resources."""
-    config, connection_string = get_db_config()
-    try:
-        with connect(connection_string) as conn:
-            with conn.cursor() as cursor:
-                # Use INFORMATION_SCHEMA to list tables in MSSQL
-                cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
-                tables = cursor.fetchall()
-                logger.info(f"Found tables: {tables}")
-                
-                resources = []
-                for table in tables:
-                    resources.append(
-                        Resource(
-                            uri=f"mssql://{table[0]}/data",
-                            name=f"Table: {table[0]}",
-                            mimeType="text/plain",
-                            description=f"Data in table: {table[0]}"
-                        )
-                    )
-                return resources
-    except Error as e:
-        logger.error(f"Failed to list resources: {str(e)}")
-        return []
+def _get_connection():
+    """Create and return a database connection."""
+    _, connection_string = get_db_config()
+    return connect(connection_string)
 
-@app.read_resource()
-async def read_resource(uri: AnyUrl) -> str:
-    """Read table contents."""
-    config, connection_string = get_db_config()
-    uri_str = str(uri)
-    logger.info(f"Reading resource: {uri_str}")
-    
-    if not uri_str.startswith("mssql://"):
-        raise ValueError(f"Invalid URI scheme: {uri_str}")
-        
-    parts = uri_str[8:].split('/')
-    table = parts[0]
-    
+
+def _get_valid_tables():
+    """Fetch the set of valid table names from the database."""
+    with _get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE = 'BASE TABLE';"
+            )
+            return {(row[0], row[1]) for row in cursor.fetchall()}
+
+
+# Initialize MCP server
+mcp = MCPServer("mssql_mcp_server")
+
+
+# ─── Resources ───────────────────────────────────────────────────────────────
+
+@mcp.resource("mssql://{table}/data")
+def read_table_data(table: str) -> str:
+    """Read the first 100 rows from a table.
+
+    Returns CSV-formatted data with column headers.
+    """
+    logger.info(f"Reading resource for table: {table}")
+
+    # Validate table exists to prevent SQL injection
+    valid_tables = _get_valid_tables()
+    table_names = {name for _, name in valid_tables}
+    if table not in table_names:
+        raise ValueError(f"Table not found: {table!r}")
+
+    safe_table = _validate_identifier(table)
+
     try:
-        with connect(connection_string) as conn:
+        with _get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(f"SELECT TOP 100 * FROM {table}")
+                cursor.execute(f"SELECT TOP 100 * FROM {safe_table}")
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
                 result = [",".join(map(str, row)) for row in rows]
                 return "\n".join([",".join(columns)] + result)
-                
+
     except Error as e:
-        logger.error(f"Database error reading resource {uri}: {str(e)}")
+        logger.error(f"Database error reading table {table}: {str(e)}")
         raise RuntimeError(f"Database error: {str(e)}")
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available MSSQL tools."""
-    logger.info("Listing tools...")
-    return [
-        Tool(
-            name="execute_sql",
-            description="Execute an SQL query on the MSSQL server",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The SQL query to execute"
-                    }
-                },
-                "required": ["query"]
-            }
-        )
-    ]
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Execute SQL commands."""
-    config, connection_string = get_db_config()
-    logger.info(f"Calling tool: {name} with arguments: {arguments}")
-    
-    if name != "execute_sql":
-        raise ValueError(f"Unknown tool: {name}")
-    
-    query = arguments.get("query")
-    if not query:
-        raise ValueError("Query is required")
-    
+# ─── Tools ───────────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+    }
+)
+def list_tables() -> str:
+    """List all available tables in the connected MSSQL database.
+
+    Returns a list of table names with their schemas.
+    """
+    logger.info("Listing tables...")
+    config, _ = get_db_config()
+
     try:
-        with connect(connection_string) as conn:
+        with _get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME;"
+                )
+                tables = cursor.fetchall()
+                header = f"Tables in {config['database']}"
+                rows = [f"  {row[0]}.{row[1]}" for row in tables]
+                return "\n".join([header, "-" * len(header)] + rows)
+
+    except Error as e:
+        logger.error(f"Error listing tables: {str(e)}")
+        raise RuntimeError(f"Database error: {str(e)}")
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+    }
+)
+def query_sql(query: str) -> str:
+    """Execute a read-only SQL SELECT query on the MSSQL server.
+
+    Use this tool for SELECT statements and other read operations.
+    For data modifications (INSERT, UPDATE, DELETE), use execute_sql instead.
+
+    Args:
+        query: The SQL SELECT query to execute.
+    """
+    logger.info(f"Executing read query: {query}")
+
+    stripped = query.strip().upper()
+    if not stripped.startswith("SELECT") and stripped != "SHOW TABLES":
+        raise ValueError(
+            "query_sql only supports SELECT queries. "
+            "Use execute_sql for INSERT, UPDATE, DELETE, or other statements."
+        )
+
+    # Handle SHOW TABLES as a MySQL compatibility shim
+    if stripped == "SHOW TABLES":
+        return list_tables()
+
+    try:
+        with _get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query)
-                
-                # Special handling for listing tables in MSSQL
-                if query.strip().upper() == "SHOW TABLES":
-                    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
-                    tables = cursor.fetchall()
-                    result = [f"Tables_in_{config['database']}"]  # Header
-                    result.extend([table[0] for table in tables])
-                    return [TextContent(type="text", text="\n".join(result))]
-                
-                # Regular SELECT queries
-                elif query.strip().upper().startswith("SELECT"):
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                result = [",".join(map(str, row)) for row in rows]
+                return "\n".join([",".join(columns)] + result)
+
+    except Exception as e:
+        logger.error(f"Error executing query '{query}': {e}")
+        raise RuntimeError(f"Error executing query: {str(e)}")
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+    }
+)
+def execute_sql(query: str) -> str:
+    """Execute any SQL statement on the MSSQL server.
+
+    This tool can execute any SQL including INSERT, UPDATE, DELETE,
+    CREATE, ALTER, DROP, and SELECT statements. Use query_sql for
+    read-only operations when possible.
+
+    Args:
+        query: The SQL statement to execute.
+    """
+    logger.info(f"Executing SQL: {query}")
+
+    try:
+        with _get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+
+                # SELECT queries — return results
+                if query.strip().upper().startswith("SELECT"):
                     columns = [desc[0] for desc in cursor.description]
                     rows = cursor.fetchall()
                     result = [",".join(map(str, row)) for row in rows]
-                    return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
-                
-                # Non-SELECT queries
+                    return "\n".join([",".join(columns)] + result)
+
+                # Non-SELECT queries — commit and report
                 else:
                     conn.commit()
-                    return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {cursor.rowcount}")]
-                
+                    return f"Query executed successfully. Rows affected: {cursor.rowcount}"
+
     except Exception as e:
         logger.error(f"Error executing SQL '{query}': {e}")
-        return [TextContent(type="text", text=f"Error executing query: {str(e)}")]
+        raise RuntimeError(f"Error executing query: {str(e)}")
 
-async def main():
+
+# ─── Entry Point ─────────────────────────────────────────────────────────────
+
+def main():
     """Main entry point to run the MCP server."""
-    from mcp.server.stdio import stdio_server
-    
     logger.info("Starting MSSQL MCP server...")
-    config, _ = get_db_config()
-    logger.info(f"Database config: {config['server']}/{config['database']} as {config['user']}")
-    
-    async with stdio_server() as (read_stream, write_stream):
-        try:
-            await app.run(
-                read_stream,
-                write_stream,
-                app.create_initialization_options()
-            )
-        except Exception as e:
-            logger.error(f"Server error: {str(e)}", exc_info=True)
-            raise
+    try:
+        config, _ = get_db_config()
+        logger.info(f"Database config: {config['server']}/{config['database']}")
+    except ValueError:
+        logger.warning("Database config not set — server will start but tools will fail until configured")
+
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

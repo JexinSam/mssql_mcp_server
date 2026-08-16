@@ -8,54 +8,89 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  # Unit tests (no DB required)
+  unit-tests:
     runs-on: ubuntu-latest
-    
-    services:
-      mssql:
-        image: mcr.microsoft.com/mssql/server:2019-latest 
-        env:
-          ACCEPT_EULA: Y
-          MSSQL_PID: Express
-          MSSQL_SA_PASSWORD: testpassword
-        ports:
-          - 1433:1433
 
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install -r requirements-dev.txt
         pip install -e .
-        
+
+    - name: Run unit tests
+      run: |
+        python -m pytest tests/ -v -k "not TestWithDatabase"
+
+  # Integration tests (require MSSQL)
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_PID: Express
+          MSSQL_SA_PASSWORD: TestPassword123!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPassword123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install ODBC Driver
+      run: |
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+        curl -fsSL https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install -e .
+
     - name: Verify installation
       run: |
-        # Show Python path
-        python -c "import sys; print('\n'.join(sys.path))"
-        # Try importing the module
         python -c "import mssql_mcp_server; print('Module found at:', mssql_mcp_server.__file__)"
-        # List installed packages
         pip list | grep mssql
-        # Show the content of site-packages
-        ls -R $(python -c "import site; print(site.getsitepackages()[0])")
 
-    - name: Run tests
+    - name: Run all tests
       env:
         MSSQL_HOST: localhost
         MSSQL_USER: sa
-        MSSQL_PASSWORD: testpassword
+        MSSQL_PASSWORD: TestPassword123!
         MSSQL_DATABASE: master
+        MSSQL_DRIVER: ODBC Driver 18 for SQL Server
       run: |
-        python -m pytest -v
+        python -m pytest tests/ -v
