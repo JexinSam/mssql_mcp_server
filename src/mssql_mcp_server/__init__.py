@@ -1,9 +1,4 @@
-from . import server
-import asyncio
-
-def main():
-   """Main entry point for the package."""
-   asyncio.run(server.main())
+from .server import main, mcp
 
 # Expose important items at package level
-__all__ = ['main', 'server']
+__all__ = ['main', 'mcp']
