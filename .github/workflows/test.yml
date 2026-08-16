@@ -6,6 +6,8 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # Allows publish.yml to gate releases on this suite
+  workflow_call:
 
 jobs:
   # Unit tests (no DB required)
