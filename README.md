@@ -7,13 +7,16 @@ MSSQL MCP Server is a **Model Context Protocol (MCP) server** that enables secur
 - Read table contents
 - Execute SQL queries with controlled access
 
-This ensures safer database exploration, strict permission enforcement, and logging of database interactions.
+Built on **MCP SDK v2** (2026-07-28 spec) with support for both **stdio** and **Streamable HTTP** transports.
 
 ## Features
 
 - **Secure MSSQL Database Access** through environment variables
-- **Controlled Query Execution** with error handling
-- **Table Listing & Data Retrieval**
+- **SQL Injection Protection** with identifier validation
+- **Read-Only & Write Tools** with appropriate MCP annotations
+- **Windows Authentication** support via Trusted Connection
+- **Dual Transport** — stdio (default) and HTTP
+- **Docker Support** with pre-configured ODBC drivers
 - **Comprehensive Logging** for monitoring queries and operations
 
 ## Installation
@@ -27,21 +30,37 @@ pip install mssql-mcp-server
 Set the following environment variables to configure database access:
 
 ```bash
-MSSQL_DRIVER=mssql_driver
-MSSQL_HOST=localhost
+# Required
+MSSQL_DATABASE=your_database
+
+# Authentication (choose one):
+# Option 1: SQL Server Authentication
 MSSQL_USER=your_username
 MSSQL_PASSWORD=your_password
-MSSQL_DATABASE=your_database
-#optional
-TrustServerCertificate=yes
-Trusted_Connection=no
+
+# Option 2: Windows / Kerberos Authentication
+Trusted_Connection=yes
+
+# Optional
+MSSQL_HOST=localhost           # or use MSSQL_SERVER
+MSSQL_DRIVER=SQL Server        # default driver
+TrustServerCertificate=yes     # default: yes
+MCP_TRANSPORT=stdio            # or "http" for Streamable HTTP
 ```
+
+## Available Tools
+
+| Tool | Description | Annotations |
+|------|-------------|-------------|
+| `list_tables` | List all tables in the database | Read-only, Idempotent |
+| `query_sql` | Execute read-only SELECT queries | Read-only, Idempotent |
+| `execute_sql` | Execute any SQL statement (SELECT, INSERT, UPDATE, DELETE, DDL) | Destructive |
 
 ## Usage
 
 ### With Claude Desktop
 
-To integrate with **Claude Desktop**, add this configuration to `claude_desktop_config.json`:
+Add this configuration to `claude_desktop_config.json`:
 
 ```json
 {
@@ -55,7 +74,6 @@ To integrate with **Claude Desktop**, add this configuration to `claude_desktop_
         "mssql_mcp_server"
       ],
       "env": {
-        "MSSQL_DRIVER": "mssql_driver",
         "MSSQL_HOST": "localhost",
         "MSSQL_USER": "your_username",
         "MSSQL_PASSWORD": "your_password",
@@ -66,21 +84,79 @@ To integrate with **Claude Desktop**, add this configuration to `claude_desktop_
 }
 ```
 
+### With Cursor IDE
+
+Add this to your `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "path/to/mssql_mcp_server",
+        "run",
+        "mssql_mcp_server"
+      ],
+      "env": {
+        "MSSQL_HOST": "localhost",
+        "MSSQL_USER": "your_username",
+        "MSSQL_PASSWORD": "your_password",
+        "MSSQL_DATABASE": "your_database"
+      }
+    }
+  }
+}
+```
+
+### With pip install (global)
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "mssql_mcp_server",
+      "env": {
+        "MSSQL_HOST": "localhost",
+        "MSSQL_USER": "your_username",
+        "MSSQL_PASSWORD": "your_password",
+        "MSSQL_DATABASE": "your_database"
+      }
+    }
+  }
+}
+```
+
+### With Docker
+
+```bash
+docker build -t mssql-mcp-server .
+docker run -e MSSQL_HOST=host.docker.internal \
+           -e MSSQL_USER=your_username \
+           -e MSSQL_PASSWORD=your_password \
+           -e MSSQL_DATABASE=your_database \
+           mssql-mcp-server
+```
+
 ### Running as a Standalone Server
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the server
+# Run the server (stdio)
 python -m mssql_mcp_server
+
+# Run with HTTP transport
+MCP_TRANSPORT=http python -m mssql_mcp_server
 ```
 
-## Development
+### Development & Testing
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mssql_mcp_server.git
+git clone https://github.com/JexinSam/mssql_mcp_server.git
 cd mssql_mcp_server
 
 # Set up a virtual environment
@@ -89,10 +165,35 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install development dependencies
 pip install -r requirements-dev.txt
+pip install -e .
 
 # Run tests
-pytest
+pytest -v
+
+# Test with MCP Inspector
+uv run mcp dev src/mssql_mcp_server/server.py
 ```
+
+## Troubleshooting
+
+### "Program Not Found" Error
+
+This usually means the `mssql_mcp_server` command is not in your PATH. Solutions:
+
+1. **Use `uv`** (recommended): Configure your MCP client to use `uv --directory path/to/mssql_mcp_server run mssql_mcp_server`
+2. **Use full path**: Find the install location with `pip show mssql-mcp-server` and use the scripts directory
+3. **Use `python -m`**: Run as `python -m mssql_mcp_server`
+
+### MSSQL Driver Issues
+
+The default driver is `SQL Server` (built into Windows). For Linux/macOS or newer features:
+
+1. Install [Microsoft ODBC Driver 18](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
+2. Set `MSSQL_DRIVER="ODBC Driver 18 for SQL Server"`
+
+### Connection Timeouts
+
+If using `MSSQL_SERVER` from other projects, this server supports both `MSSQL_HOST` and `MSSQL_SERVER` env vars (with `MSSQL_HOST` taking priority).
 
 ## Security Considerations
 
@@ -134,4 +235,3 @@ We welcome contributions! To contribute:
 
 ### Need Help?
 For any questions or issues, feel free to open a GitHub **[Issue](https://github.com/JexinSam/mssql_mcp_server/issues)** or reach out to the maintainers.
-
