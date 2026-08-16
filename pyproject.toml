@@ -4,14 +4,9 @@ version = "1.0.0"
 description = "A Model Context Protocol (MCP) server that enables secure interaction with MSSQL databases. This server allows AI assistants to list tables, read data, and execute SQL queries through a controlled interface, making database exploration and analysis safer and more structured."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "mcp[cli]>=2.0.0",
-    "pyodbc>=5.2.0",
+authors = [
+    { name = "Jexin Sam", email = "jexin.sam@gmail.com" },
 ]
-[[project.authors]]
-name = "Jexin Sam"
-email = "jexin.sam@gmail.com"
-
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -19,6 +14,10 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Database",
+]
+dependencies = [
+    "mcp[cli]>=2.0.0",
+    "pyodbc>=5.2.0",
 ]
 
 [build-system]
