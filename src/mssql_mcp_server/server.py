@@ -85,10 +85,33 @@ def is_valid_config_present(config):
     return False
 
 
+# Driver messages that indicate the server certificate could not be validated.
+_CERT_ERROR_HINTS = ("certificate", "ssl provider", "ssl security error")
+
+# Values of TrustServerCertificate that disable certificate validation.
+_TRUTHY = ("yes", "true", "1")
+
+
 def _get_connection():
     """Create and return a database connection."""
-    _, connection_string = get_db_config()
-    return connect(connection_string)
+    config, connection_string = get_db_config()
+    try:
+        return connect(connection_string)
+    except Error as e:
+        message = str(e).lower()
+        trusting = config["trusted_server_certificate"].lower() in _TRUTHY
+        if not trusting and any(hint in message for hint in _CERT_ERROR_HINTS):
+            raise RuntimeError(
+                f"Failed to connect to '{config['server']}': the server's TLS "
+                "certificate could not be verified.\n\n"
+                "TrustServerCertificate defaults to 'no' as of v1.0.0 (releases "
+                "before that defaulted to 'yes'). If this server uses a self-signed "
+                "or internally-issued certificate, set TrustServerCertificate=yes to "
+                "restore the previous behaviour, or install the issuing CA "
+                "certificate on this machine.\n\n"
+                f"Original driver error: {e}"
+            ) from e
+        raise
 
 
 def _get_valid_tables():

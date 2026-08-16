@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from pyodbc import Error
 from mssql_mcp_server.server import (
     mcp,
     get_db_config,
@@ -7,6 +8,7 @@ from mssql_mcp_server.server import (
     list_tables,
     query_sql,
     execute_sql,
+    _get_connection,
 )
 
 
@@ -110,6 +112,50 @@ class TestQuerySqlValidation:
     def test_rejects_update(self, mock_conn):
         with pytest.raises(ValueError, match="query_sql only supports SELECT"):
             query_sql("UPDATE users SET name='test'")
+
+
+class TestCertificateErrorHelp:
+    """TrustServerCertificate flipped from 'yes' to 'no' in v1.0.0, so a cert
+    failure needs to point users at the setting that changed."""
+
+    ENV = {
+        "MSSQL_HOST": "dbhost",
+        "MSSQL_DATABASE": "testdb",
+        "MSSQL_USER": "user",
+        "MSSQL_PASSWORD": "pass",
+    }
+
+    CERT_ERROR = Error(
+        "08001",
+        "[08001] [Microsoft][ODBC Driver 18 for SQL Server]SSL Provider: "
+        "The certificate chain was issued by an authority that is not trusted.",
+    )
+
+    @patch.dict("os.environ", ENV, clear=True)
+    @patch("mssql_mcp_server.server.connect")
+    def test_cert_failure_explains_setting(self, mock_connect):
+        mock_connect.side_effect = self.CERT_ERROR
+        with pytest.raises(RuntimeError, match="TrustServerCertificate") as exc:
+            _get_connection()
+        assert "v1.0.0" in str(exc.value)
+        assert "dbhost" in str(exc.value)
+        # Original driver error is preserved, not swallowed
+        assert isinstance(exc.value.__cause__, Error)
+
+    @patch.dict("os.environ", {**ENV, "TrustServerCertificate": "yes"}, clear=True)
+    @patch("mssql_mcp_server.server.connect")
+    def test_no_hint_when_already_trusting(self, mock_connect):
+        """Already opted in, so the cert hint would be misleading."""
+        mock_connect.side_effect = self.CERT_ERROR
+        with pytest.raises(Error):
+            _get_connection()
+
+    @patch.dict("os.environ", ENV, clear=True)
+    @patch("mssql_mcp_server.server.connect")
+    def test_unrelated_errors_propagate(self, mock_connect):
+        mock_connect.side_effect = Error("28000", "[28000] Login failed for user 'user'.")
+        with pytest.raises(Error):
+            _get_connection()
 
 
 # ─── Integration Tests (require DB) ─────────────────────────────────────────
