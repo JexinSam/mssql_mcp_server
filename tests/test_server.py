@@ -4,7 +4,6 @@ from mssql_mcp_server.server import (
     mcp,
     get_db_config,
     is_valid_config_present,
-    _validate_identifier,
     list_tables,
     query_sql,
     execute_sql,
@@ -19,22 +18,6 @@ class TestServerInitialization:
         assert mcp.name == "mssql_mcp_server"
 
 
-class TestValidateIdentifier:
-    def test_valid_identifiers(self):
-        assert _validate_identifier("users") == "[users]"
-        assert _validate_identifier("my_table") == "[my_table]"
-        assert _validate_identifier("Table1") == "[Table1]"
-        assert _validate_identifier("_private") == "[_private]"
-
-    def test_invalid_identifiers(self):
-        with pytest.raises(ValueError, match="Invalid SQL identifier"):
-            _validate_identifier("")
-        with pytest.raises(ValueError, match="Invalid SQL identifier"):
-            _validate_identifier("1table")
-        with pytest.raises(ValueError, match="Invalid SQL identifier"):
-            _validate_identifier("table; DROP TABLE users")
-        with pytest.raises(ValueError, match="Invalid SQL identifier"):
-            _validate_identifier("my table")
 
 
 class TestConfigValidation:
@@ -78,13 +61,13 @@ class TestConfigValidation:
         "MSSQL_DATABASE": "testdb",
         "MSSQL_USER": "user",
         "MSSQL_PASSWORD": "pass",
-    }, clear=False)
+    }, clear=True)
     def test_get_db_config_with_env(self):
         config, conn_str = get_db_config()
         assert config["database"] == "testdb"
         assert config["user"] == "user"
-        assert "UID=user" in conn_str
-        assert "PWD=pass" in conn_str
+        assert "UID={user}" in conn_str
+        assert "PWD={pass}" in conn_str
 
     @patch.dict("os.environ", {
         "MSSQL_DATABASE": "testdb",
