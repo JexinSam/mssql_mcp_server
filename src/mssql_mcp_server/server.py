@@ -1,3 +1,5 @@
+import csv
+import io
 import logging
 import os
 import re
@@ -12,15 +14,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mssql_mcp_server")
 
-# Valid SQL identifier pattern to prevent SQL injection
-_VALID_IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_@#$]*$')
+
+def _escape_conn_str_value(value: str | None) -> str:
+    """Safely brace connection string values to prevent injection."""
+    if not value:
+        return ""
+    # Double any closing braces and wrap in braces
+    safe_val = str(value).replace("}", "}}")
+    return f"{{{safe_val}}}"
 
 
-def _validate_identifier(name: str) -> str:
-    """Validate and quote a SQL identifier to prevent injection."""
-    if not name or not _VALID_IDENTIFIER.match(name):
-        raise ValueError(f"Invalid SQL identifier: {name!r}")
-    return f"[{name}]"
+def _format_csv(columns: list[str], rows: list[tuple]) -> str:
+    """Format columns and rows as a valid CSV string."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(columns)
+    writer.writerows(rows)
+    return output.getvalue().strip()
 
 
 def get_db_config():
@@ -31,7 +41,7 @@ def get_db_config():
         "user": os.getenv("MSSQL_USER"),
         "password": os.getenv("MSSQL_PASSWORD"),
         "database": os.getenv("MSSQL_DATABASE"),
-        "trusted_server_certificate": os.getenv("TrustServerCertificate", "yes"),
+        "trusted_server_certificate": os.getenv("TrustServerCertificate", "no"),
         "trusted_connection": os.getenv("Trusted_Connection", "no")
     }
 
@@ -40,24 +50,22 @@ def get_db_config():
         logger.error("MSSQL_DATABASE and either MSSQL_USER and MSSQL_PASSWORD, or Trusted_Connection=yes is required")
         raise ValueError("Missing required database configuration")
 
-    # Build connection string — omit UID/PWD for Trusted Connection
+    # Build connection string safely
+    base_conn_str = (
+        f"Driver={_escape_conn_str_value(config['driver'])};"
+        f"Server={_escape_conn_str_value(config['server'])};"
+        f"Database={_escape_conn_str_value(config['database'])};"
+        f"TrustServerCertificate={_escape_conn_str_value(config['trusted_server_certificate'])};"
+    )
+
     if config["trusted_connection"].lower() == "yes":
-        connection_string = (
-            f"Driver={config['driver']};"
-            f"Server={config['server']};"
-            f"Database={config['database']};"
-            f"TrustServerCertificate={config['trusted_server_certificate']};"
-            f"Trusted_Connection=yes;"
-        )
+        connection_string = base_conn_str + "Trusted_Connection=yes;"
     else:
         connection_string = (
-            f"Driver={config['driver']};"
-            f"Server={config['server']};"
-            f"UID={config['user']};"
-            f"PWD={config['password']};"
-            f"Database={config['database']};"
-            f"TrustServerCertificate={config['trusted_server_certificate']};"
-            f"Trusted_Connection={config['trusted_connection']};"
+            base_conn_str +
+            f"UID={_escape_conn_str_value(config['user'])};"
+            f"PWD={_escape_conn_str_value(config['password'])};"
+            f"Trusted_Connection={_escape_conn_str_value(config['trusted_connection'])};"
         )
 
     return config, connection_string
@@ -84,7 +92,7 @@ def _get_connection():
 
 
 def _get_valid_tables():
-    """Fetch the set of valid table names from the database."""
+    """Fetch the set of valid table names from the database as a set of (schema, table) tuples."""
     with _get_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -100,33 +108,32 @@ mcp = MCPServer("mssql_mcp_server")
 
 # ─── Resources ───────────────────────────────────────────────────────────────
 
-@mcp.resource("mssql://{table}/data")
-def read_table_data(table: str) -> str:
+@mcp.resource("mssql://{schema}/{table}/data")
+def read_table_data(schema: str, table: str) -> str:
     """Read the first 100 rows from a table.
 
     Returns CSV-formatted data with column headers.
     """
-    logger.info(f"Reading resource for table: {table}")
+    logger.info(f"Reading resource for table: {schema}.{table}")
 
-    # Validate table exists to prevent SQL injection
     valid_tables = _get_valid_tables()
-    table_names = {name for _, name in valid_tables}
-    if table not in table_names:
-        raise ValueError(f"Table not found: {table!r}")
+    if (schema, table) not in valid_tables:
+        raise ValueError(f"Table not found: {schema}.{table}")
 
-    safe_table = _validate_identifier(table)
+    # Safely quote the schema and table name
+    safe_schema = f"[{schema}]"
+    safe_table = f"[{table}]"
 
     try:
         with _get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(f"SELECT TOP 100 * FROM {safe_table}")
+                cursor.execute(f"SELECT TOP 100 * FROM {safe_schema}.{safe_table}")
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                result = [",".join(map(str, row)) for row in rows]
-                return "\n".join([",".join(columns)] + result)
+                return _format_csv(columns, rows)
 
     except Error as e:
-        logger.error(f"Database error reading table {table}: {str(e)}")
+        logger.error(f"Database error reading table {schema}.{table}: {str(e)}")
         raise RuntimeError(f"Database error: {str(e)}")
 
 
@@ -182,25 +189,26 @@ def query_sql(query: str) -> str:
     """
     logger.info(f"Executing read query: {query}")
 
-    stripped = query.strip().upper()
-    if not stripped.startswith("SELECT") and stripped != "SHOW TABLES":
+    # Only allow SELECT, WITH, SHOW queries
+    if not re.match(r"^\s*(SELECT|WITH|SHOW)\b", query, re.IGNORECASE):
         raise ValueError(
-            "query_sql only supports SELECT queries. "
+            "query_sql only supports SELECT/WITH/SHOW queries. "
             "Use execute_sql for INSERT, UPDATE, DELETE, or other statements."
         )
 
     # Handle SHOW TABLES as a MySQL compatibility shim
-    if stripped == "SHOW TABLES":
+    if query.strip().upper() == "SHOW TABLES":
         return list_tables()
 
     try:
         with _get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query)
+                if cursor.description is None:
+                    raise ValueError("Query did not return a result set.")
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                result = [",".join(map(str, row)) for row in rows]
-                return "\n".join([",".join(columns)] + result)
+                return _format_csv(columns, rows)
 
     except Exception as e:
         logger.error(f"Error executing query '{query}': {e}")
@@ -231,13 +239,11 @@ def execute_sql(query: str) -> str:
             with conn.cursor() as cursor:
                 cursor.execute(query)
 
-                # SELECT queries — return results
-                if query.strip().upper().startswith("SELECT"):
+                # If query returns a result set
+                if cursor.description is not None:
                     columns = [desc[0] for desc in cursor.description]
                     rows = cursor.fetchall()
-                    result = [",".join(map(str, row)) for row in rows]
-                    return "\n".join([",".join(columns)] + result)
-
+                    return _format_csv(columns, rows)
                 # Non-SELECT queries — commit and report
                 else:
                     conn.commit()
@@ -260,6 +266,9 @@ def main():
         logger.warning("Database config not set — server will start but tools will fail until configured")
 
     transport = os.getenv("MCP_TRANSPORT", "stdio")
+    if transport.lower() == "http":
+        transport = "streamable-http"
+    
     mcp.run(transport=transport)
 
 

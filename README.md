@@ -44,8 +44,8 @@ Trusted_Connection=yes
 # Optional
 MSSQL_HOST=localhost           # or use MSSQL_SERVER
 MSSQL_DRIVER=SQL Server        # default driver
-TrustServerCertificate=yes     # default: yes
-MCP_TRANSPORT=stdio            # or "http" for Streamable HTTP
+TrustServerCertificate=no      # default: no (set to yes for self-signed certs)
+MCP_TRANSPORT=stdio            # or "streamable-http" for Streamable HTTP
 ```
 
 ## Available Tools
@@ -149,7 +149,7 @@ pip install -r requirements.txt
 python -m mssql_mcp_server
 
 # Run with HTTP transport
-MCP_TRANSPORT=http python -m mssql_mcp_server
+MCP_TRANSPORT=streamable-http python -m mssql_mcp_server
 ```
 
 ### Development & Testing
@@ -199,7 +199,7 @@ If using `MSSQL_SERVER` from other projects, this server supports both `MSSQL_HO
 
 - **Use a dedicated MSSQL user** with minimal privileges.
 - **Never use root credentials** or full administrative accounts.
-- **Restrict database access** to only necessary operations.
+- **Restrict database access** to only necessary operations (e.g. use `GRANT SELECT` only if the model should not modify data). The `readOnlyHint` and `destructiveHint` annotations are for client UX; security is enforced entirely by your database credentials.
 - **Enable logging and auditing** for security monitoring.
 - **Regularly review permissions** to ensure least privilege access.
 
