@@ -1,11 +1,19 @@
 import csv
+import functools
 import io
 import logging
 import os
 import re
+
+import anyio.from_thread
+import anyio.to_thread
 from pyodbc import connect, Error
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+from .importer import ExcelImportError, ImportResult, PreviewResult, preview_import, run_import
+from .importer.inference import ColumnSpec
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +39,47 @@ def _format_csv(columns: list[str], rows: list[tuple]) -> str:
     writer.writerow(columns)
     writer.writerows(rows)
     return output.getvalue().strip()
+
+
+def _format_columns(columns: list[ColumnSpec]) -> str:
+    """One line per column: name, SQL type and nullability."""
+    return "\n".join(
+        f"  {c.name}  {c.sql_type}  {'NULL' if c.nullable else 'NOT NULL'}" for c in columns
+    )
+
+
+def _format_preview(result: PreviewResult) -> str:
+    """Plain-text summary of an import preview."""
+    analysis = result.analysis
+    target = f"{result.schema}.{result.table}"
+    status = "available" if result.available else f"NOT available: {result.unavailable_reason}"
+    lines = [
+        f"File: {result.file_path}",
+        f"Sheet: {analysis.sheet} (available sheets: {', '.join(analysis.sheets)})",
+        f"Table starts at: {analysis.start_cell}",
+        f"Header detected: {'yes' if analysis.layout.header_row is not None else 'no'}",
+        f"Data rows: {analysis.row_count}",
+        f"Target table: {target} — {status}",
+    ]
+    if analysis.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in analysis.warnings)
+    lines += ["Columns:", _format_columns(analysis.columns), "First 5 rows:"]
+    lines.append(_format_csv([c.name for c in analysis.columns], analysis.preview_rows))
+    return "\n".join(lines)
+
+
+def _format_import(result: ImportResult) -> str:
+    """Plain-text summary of a finished import."""
+    return "\n".join(
+        [
+            f"Imported {result.rows} rows into {result.schema}.{result.table} "
+            f"in {result.seconds:.1f}s.",
+            "Columns:",
+            _format_columns(result.columns),
+            "You can now query it with query_sql.",
+        ]
+    )
 
 
 def get_db_config():
@@ -160,6 +209,33 @@ def read_table_data(schema: str, table: str) -> str:
         raise RuntimeError(f"Database error: {str(e)}")
 
 
+async def _run_in_worker(service_fn, ctx: Context | None, **kwargs):
+    """Run a blocking import service function in a worker thread.
+
+    Progress reported by the service (from that thread) is relayed to the client
+    through ``ctx.report_progress``, which is a no-op if the client did not ask for it.
+    Import, configuration (``ValueError``) and database errors are re-raised as
+    ``ToolError`` so that their message reaches the client: the SDK hides the text of
+    any other exception. A raw ``pyodbc.Error`` becomes "Database error: ...".
+    """
+    progress = None
+    if ctx is not None:
+
+        def progress(done: float, total: float | None, message: str) -> None:
+            anyio.from_thread.run(ctx.report_progress, done, total, message)
+
+    try:
+        return await anyio.to_thread.run_sync(
+            functools.partial(service_fn, get_connection=_get_connection, progress=progress, **kwargs)
+        )
+    except Error as e:
+        logger.error(f"Excel import failed: database error: {e}")
+        raise ToolError(f"Database error: {str(e)}") from e
+    except (ExcelImportError, ValueError, RuntimeError) as e:
+        logger.error(f"Excel import failed: {e}")
+        raise ToolError(str(e)) from e
+
+
 # ─── Tools ───────────────────────────────────────────────────────────────────
 
 @mcp.tool(
@@ -275,6 +351,101 @@ def execute_sql(query: str) -> str:
     except Exception as e:
         logger.error(f"Error executing SQL '{query}': {e}")
         raise RuntimeError(f"Error executing query: {str(e)}")
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+    }
+)
+async def preview_excel_import(
+    file_path: str,
+    table_name: str | None = None,
+    schema: str = "dbo",
+    sheet: str | None = None,
+    has_header: bool | None = None,
+    header_row: int | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Preview importing a sheet of a local Excel file (.xlsx, .xlsm, .xls) into a NEW SQL Server table. Writes nothing.
+
+    How to use this tool:
+    1. Ask the user ONLY for the table name, unless they already gave one; if they
+       don't want to choose, leave table_name empty and the sheet name is used.
+       Do not ask any other question.
+    2. Call this tool and show the user the columns, types and first 5 rows,
+       plus any warnings, then ask "Shall I proceed?".
+    3. If the target table is NOT available, tell the user which name is taken and
+       ask for another name, then preview again.
+    4. Only after the user confirms, call import_excel with exactly the same arguments.
+
+    Args:
+        file_path: Local path to the Excel file on the server machine.
+        table_name: Name of the new table. Defaults to the sanitized sheet name.
+        schema: Target schema. Defaults to dbo.
+        sheet: Never ask for this. Pass it only if the user names a sheet; defaults to the first sheet.
+        has_header: Never ask for this. Pass it only if the user says the first row is or is not a header.
+        header_row: Never ask for this. Pass the Excel row number of the header only if the user points it out.
+    """
+    logger.info(f"Previewing Excel import: {file_path} -> {schema}.{table_name or '<sheet name>'}")
+    result = await _run_in_worker(
+        preview_import,
+        ctx,
+        file_path=file_path,
+        table_name=table_name,
+        schema=schema,
+        sheet=sheet,
+        has_header=has_header,
+        header_row=header_row,
+    )
+    return _format_preview(result)
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+    }
+)
+async def import_excel(
+    file_path: str,
+    table_name: str | None = None,
+    schema: str = "dbo",
+    sheet: str | None = None,
+    has_header: bool | None = None,
+    header_row: int | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Import a sheet of a local Excel file into a NEW SQL Server table.
+
+    Call this ONLY after preview_excel_import was shown to the user and they
+    confirmed it, passing exactly the same arguments. Fails without writing
+    anything if the table already exists. The table is created and loaded in a
+    single transaction: on any error nothing is left behind.
+
+    Args:
+        file_path: Local path to the Excel file on the server machine.
+        table_name: Name of the new table. Defaults to the sanitized sheet name.
+        schema: Target schema. Defaults to dbo.
+        sheet: Never ask for this. Pass it only if the user names a sheet; defaults to the first sheet.
+        has_header: Never ask for this. Pass it only if the user says the first row is or is not a header.
+        header_row: Never ask for this. Pass the Excel row number of the header only if the user points it out.
+    """
+    logger.info(f"Importing Excel file: {file_path} -> {schema}.{table_name or '<sheet name>'}")
+    result = await _run_in_worker(
+        run_import,
+        ctx,
+        file_path=file_path,
+        table_name=table_name,
+        schema=schema,
+        sheet=sheet,
+        has_header=has_header,
+        header_row=header_row,
+    )
+    return _format_import(result)
 
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────

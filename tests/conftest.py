@@ -70,3 +70,39 @@ def mssql_cursor(mssql_connection):
     cursor = mssql_connection.cursor()
     yield cursor
     cursor.close()
+
+
+@pytest.fixture
+def anyio_backend():
+    """Run anyio-marked tests on asyncio only."""
+    return "asyncio"
+
+
+@pytest.fixture
+def make_xlsx(tmp_path):
+    """Factory writing an .xlsx file with openpyxl and returning its path.
+
+    ``sheets`` maps sheet name to a list of rows. Strings such as ``"=1+1"``
+    are written as (uncalculated) formulas and ``"#N/A"`` as an error cell.
+    ``formats`` maps ``(sheet, "A2")`` to a number format string.
+    """
+    import openpyxl
+
+    def _make(
+        sheets: dict[str, list[list]],
+        formats: dict[tuple[str, str], str] | None = None,
+        filename: str = "book.xlsx",
+    ):
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for name, rows in sheets.items():
+            ws = wb.create_sheet(name)
+            for row in rows:
+                ws.append(row)
+        for (sheet, ref), fmt in (formats or {}).items():
+            wb[sheet][ref].number_format = fmt
+        path = tmp_path / filename
+        wb.save(path)
+        return path
+
+    return _make

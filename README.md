@@ -55,6 +55,12 @@ MCP_TRANSPORT=stdio            # or "streamable-http" for Streamable HTTP
 | `list_tables` | List all tables in the database | Read-only, Idempotent |
 | `query_sql` | Execute read-only SELECT queries | Read-only, Idempotent |
 | `execute_sql` | Execute any SQL statement (SELECT, INSERT, UPDATE, DELETE, DDL) | Destructive |
+| `preview_excel_import` | Preview importing a sheet of a local Excel file into a new table (writes nothing) | Read-only, Idempotent |
+| `import_excel` | Import a sheet of a local Excel file into a new table | Creates new table only |
+
+## Importing Excel files
+
+Ask the assistant to import a local `.xlsx`, `.xlsm` or `.xls` file. It shows a preview (columns, types, first 5 rows) and creates a **new** table only after you confirm; existing tables are never modified. With Docker, mount the folder and pass the path inside the container.
 
 ## Usage
 
